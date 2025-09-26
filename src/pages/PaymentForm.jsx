@@ -5,7 +5,7 @@ const PaymentForm = () => {
   const { user, apiCall } = useContext(AuthContext);
   const [formData, setFormData] = useState({
     amount: '',
-    payment_method: 'bank_transfer', // Updated default
+    payment_method: 'bank_transfer',
     description: '',
     lead_id: '',
     lead_info: null
@@ -14,7 +14,12 @@ const PaymentForm = () => {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
-  // Lead search states
+  // File upload states
+  const [files, setFiles] = useState([]);
+  const [fileUploadLoading, setFileUploadLoading] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
+
+  // Lead/Customer search states
   const [leadSearchTerm, setLeadSearchTerm] = useState('');
   const [leadSearchResults, setLeadSearchResults] = useState([]);
   const [leadSearchLoading, setLeadSearchLoading] = useState(false);
@@ -23,6 +28,7 @@ const PaymentForm = () => {
   const paymentMethods = [
     { value: 'bank_transfer', label: 'Bank Transfer' },
     { value: 'tng', label: 'TNG' },
+    { value: 'card', label: 'Card' },
     { value: 'cash', label: 'Cash' }
   ];
 
@@ -38,7 +44,133 @@ const PaymentForm = () => {
     if (success) setSuccess('');
   };
 
-  // Lead search functionality
+  // File upload handlers (unchanged)
+  const handleDrag = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === "dragenter" || e.type === "dragover") {
+      setDragActive(true);
+    } else if (e.type === "dragleave") {
+      setDragActive(false);
+    }
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+    
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      handleFiles(e.dataTransfer.files);
+    }
+  };
+
+  const handleFileInput = (e) => {
+    if (e.target.files) {
+      handleFiles(e.target.files);
+    }
+  };
+
+  const handleFiles = (fileList) => {
+    const newFiles = Array.from(fileList).filter(file => {
+      if (file.size > 10 * 1024 * 1024) {
+        setError(`File ${file.name} is too large. Maximum size is 10MB.`);
+        return false;
+      }
+      
+      const allowedTypes = [
+        'image/jpeg', 'image/png', 'image/gif',
+        'application/pdf',
+        'application/msword',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'application/vnd.ms-excel',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'text/plain'
+      ];
+      
+      if (!allowedTypes.includes(file.type)) {
+        setError(`File ${file.name} has an unsupported format.`);
+        return false;
+      }
+      
+      return true;
+    });
+
+    if (newFiles.length > 0) {
+      setFiles(prev => [...prev, ...newFiles.map(file => ({
+        file,
+        id: Math.random().toString(36).substr(2, 9),
+        uploaded: false,
+        uploading: false,
+        url: null,
+        error: null
+      }))]);
+      setError('');
+    }
+  };
+
+  const removeFile = (fileId) => {
+    setFiles(prev => prev.filter(f => f.id !== fileId));
+  };
+
+  const uploadFiles = async () => {
+    setFileUploadLoading(true);
+    const updatedFiles = [...files];
+
+    try {
+      for (let i = 0; i < updatedFiles.length; i++) {
+        if (!updatedFiles[i].uploaded) {
+          updatedFiles[i].uploading = true;
+          setFiles([...updatedFiles]);
+
+          try {
+            const response = await apiCall('/upload/presigned-url', {
+              method: 'POST',
+              body: JSON.stringify({
+                filename: updatedFiles[i].file.name,
+                filetype: updatedFiles[i].file.type,
+                filesize: updatedFiles[i].file.size
+              })
+            });
+
+            if (response.success) {
+              const { uploadUrl, fileUrl } = response.data;
+
+              const uploadResponse = await fetch(uploadUrl, {
+                method: 'PUT',
+                body: updatedFiles[i].file,
+                headers: {
+                  'Content-Type': updatedFiles[i].file.type
+                }
+              });
+
+              if (uploadResponse.ok) {
+                updatedFiles[i].uploaded = true;
+                updatedFiles[i].url = fileUrl;
+                updatedFiles[i].error = null;
+              } else {
+                throw new Error('Failed to upload file to S3');
+              }
+            } else {
+              throw new Error(response.error?.message || 'Failed to get upload URL');
+            }
+          } catch (fileError) {
+            updatedFiles[i].error = fileError.message;
+          } finally {
+            updatedFiles[i].uploading = false;
+          }
+        }
+      }
+    } catch (error) {
+      console.error('File upload error:', error);
+      setError('Failed to upload some files. Please try again.');
+    } finally {
+      setFiles(updatedFiles);
+      setFileUploadLoading(false);
+    }
+  };
+
+  // Enhanced search functionality for both leads and customers
   const searchLeads = async (searchTerm) => {
     if (!searchTerm.trim()) {
       setLeadSearchResults([]);
@@ -54,7 +186,7 @@ const PaymentForm = () => {
         setLeadSearchResults([]);
       }
     } catch (err) {
-      console.error('Lead search error:', err);
+      console.error('Search error:', err);
       setLeadSearchResults([]);
     } finally {
       setLeadSearchLoading(false);
@@ -65,18 +197,23 @@ const PaymentForm = () => {
     const value = e.target.value;
     setLeadSearchTerm(value);
     
-    // Debounce the search
     clearTimeout(window.leadSearchTimeout);
     window.leadSearchTimeout = setTimeout(() => {
       searchLeads(value);
     }, 300);
   };
 
-  const selectLead = (lead) => {
+  const selectLead = (item) => {
+    // Handle both leads and customers consistently
+    const itemId = item.source_type === 'lead' ? item.lead_id : item.customer_id;
+    
     setFormData(prev => ({
       ...prev,
-      lead_id: lead.lead_id,
-      lead_info: lead
+      lead_id: itemId,
+      lead_info: {
+        ...item,
+        id: itemId
+      }
     }));
     setShowLeadSearch(false);
     setLeadSearchTerm('');
@@ -98,29 +235,40 @@ const PaymentForm = () => {
     setSuccess('');
 
     try {
-      // Validate amount
+      if (files.length > 0 && files.some(f => !f.uploaded)) {
+        await uploadFiles();
+      }
+
       const amount = parseFloat(formData.amount);
       if (!amount || amount <= 0) {
         throw new Error('Please enter a valid amount greater than 0');
       }
 
-      // Prepare payment data
+      const uploadedFiles = files
+        .filter(f => f.uploaded && f.url)
+        .map(f => ({
+          filename: f.file.name,
+          url: f.url,
+          size: f.file.size,
+          type: f.file.type
+        }));
+
       const paymentData = {
         amount: amount,
-        currency: 'MYR', // Fixed currency
         payment_method: formData.payment_method,
         description: formData.description.trim(),
-        lead_id: formData.lead_id || null
+        lead_id: formData.lead_id || null,
+        attachments: uploadedFiles
       };
 
-      // Create payment
       const response = await apiCall('/payments', {
         method: 'POST',
         body: JSON.stringify(paymentData)
       });
 
       if (response.success) {
-        setSuccess(`Payment created successfully! Payment ID: ${response.data.id} | Reference: ${response.data.reference_number}`);
+        setSuccess(`Payment created successfully! Payment ID: ${response.data.id} | Official Receipt: ${response.data.official_receipt}`);
+        
         // Reset form
         setFormData({
           amount: '',
@@ -129,6 +277,7 @@ const PaymentForm = () => {
           lead_id: '',
           lead_info: null
         });
+        setFiles([]);
       } else {
         throw new Error(response.error?.message || 'Failed to create payment');
       }
@@ -149,11 +298,26 @@ const PaymentForm = () => {
       lead_id: '',
       lead_info: null
     });
+    setFiles([]);
     setError('');
     setSuccess('');
     setLeadSearchTerm('');
     setLeadSearchResults([]);
     setShowLeadSearch(false);
+  };
+
+  const formatFileSize = (bytes) => {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  };
+
+  // Get the appropriate label for the selected item
+  const getSelectedItemLabel = () => {
+    if (!formData.lead_info) return '';
+    return formData.lead_info.source_type === 'lead' ? 'Selected Lead' : 'Selected Customer';
   };
 
   return (
@@ -168,7 +332,7 @@ const PaymentForm = () => {
       <div className="payment-form-card">
         <form onSubmit={handleSubmit} className="payment-form">
           
-          {/* Lead Selection Section */}
+          {/* Enhanced Lead/Customer Selection Section */}
           <div className="form-section">
             <h4 className="section-title">Customer Information (Optional)</h4>
             
@@ -176,7 +340,14 @@ const PaymentForm = () => {
               <div className="selected-lead">
                 <div className="lead-card">
                   <div className="lead-header">
-                    <h5>{formData.lead_info.full_name}</h5>
+                    <div className="lead-title-row">
+                      <h5>{formData.lead_info.full_name}</h5>
+                      <div className="source-type-tag-container">
+                        <span className={`source-type-tag ${formData.lead_info.source_type}`}>
+                          {formData.lead_info.source_type === 'lead' ? 'Lead' : 'Customer'}
+                        </span>
+                      </div>
+                    </div>
                     <button 
                       type="button" 
                       onClick={clearSelectedLead}
@@ -209,6 +380,11 @@ const PaymentForm = () => {
                         {formData.lead_info.status}
                       </span>
                     </div>
+                    {formData.lead_info.source && (
+                      <div className="lead-detail">
+                        <strong>Source:</strong> {formData.lead_info.source}
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -216,7 +392,7 @@ const PaymentForm = () => {
               <div className="lead-search-section">
                 <div className="form-group">
                   <label htmlFor="leadSearch" className="form-label">
-                    Search Customer
+                    Search Leads & Customers
                   </label>
                   <div className="search-input-container">
                     <input
@@ -235,22 +411,28 @@ const PaymentForm = () => {
                   
                   {showLeadSearch && leadSearchResults.length > 0 && (
                     <div className="search-results">
-                      {leadSearchResults.map((lead) => (
+                      {leadSearchResults.map((item) => (
                         <div
-                          key={lead.lead_id}
+                          key={`${item.source_type}-${item.id}`}
                           className="search-result-item"
-                          onClick={() => selectLead(lead)}
+                          onClick={() => selectLead(item)}
                         >
                           <div className="result-header">
-                            <strong>{lead.full_name}</strong>
-                            <span className={`status-badge status-${lead.status}`}>
-                              {lead.status}
+                            <div className="result-name-container">
+                              <strong>{item.full_name}</strong>
+                              <span className={`source-type-tag ${item.source_type} small`}>
+                                {item.source_type === 'lead' ? 'Lead' : 'Customer'}
+                              </span>
+                            </div>
+                            <span className={`status-badge status-${item.status} small`}>
+                              {item.status}
                             </span>
                           </div>
                           <div className="result-details">
-                            <div>{lead.email_address}</div>
-                            <div>{lead.phone_number}</div>
-                            {lead.company_name && <div>{lead.company_name}</div>}
+                            <div>{item.email_address}</div>
+                            <div>{item.phone_number}</div>
+                            {item.company_name && <div>{item.company_name}</div>}
+                            {item.job_title && <div><em>{item.job_title}</em></div>}
                           </div>
                         </div>
                       ))}
@@ -259,7 +441,7 @@ const PaymentForm = () => {
                   
                   {showLeadSearch && leadSearchTerm && leadSearchResults.length === 0 && !leadSearchLoading && (
                     <div className="no-results">
-                      No customers found matching "{leadSearchTerm}"
+                      No leads or customers found matching "{leadSearchTerm}"
                     </div>
                   )}
                 </div>
@@ -267,7 +449,7 @@ const PaymentForm = () => {
             )}
           </div>
 
-          {/* Payment Details Section */}
+          {/* Payment Details Section (unchanged) */}
           <div className="form-section">
             <h4 className="section-title">Payment Details</h4>
             
@@ -330,6 +512,67 @@ const PaymentForm = () => {
             </div>
           </div>
 
+          {/* File Upload Section (unchanged) */}
+          <div className="form-section">
+            <h4 className="section-title">Attachments (Optional)</h4>
+            
+            <div
+              className={`file-upload-area ${dragActive ? 'drag-active' : ''}`}
+              onDragEnter={handleDrag}
+              onDragLeave={handleDrag}
+              onDragOver={handleDrag}
+              onDrop={handleDrop}
+            >
+              <input
+                type="file"
+                id="file-input"
+                multiple
+                onChange={handleFileInput}
+                className="file-input"
+                disabled={loading || fileUploadLoading}
+                accept=".jpg,.jpeg,.png,.gif,.pdf,.doc,.docx,.xls,.xlsx,.txt"
+              />
+              <label htmlFor="file-input" className="file-upload-label">
+                <div className="file-upload-icon">📎</div>
+                <div className="file-upload-text">
+                  <strong>Drop files here or click to browse</strong>
+                  <br />
+                  <small>Supports: Images, PDF, Word, Excel, Text files (Max 10MB each)</small>
+                </div>
+              </label>
+            </div>
+
+            {files.length > 0 && (
+              <div className="file-list">
+                {files.map((fileItem) => (
+                  <div key={fileItem.id} className="file-item">
+                    <div className="file-info">
+                      <div className="file-name">{fileItem.file.name}</div>
+                      <div className="file-meta">
+                        {formatFileSize(fileItem.file.size)} • {fileItem.file.type}
+                      </div>
+                    </div>
+                    <div className="file-status">
+                      {fileItem.uploading && <span className="status-uploading">⏳ Uploading...</span>}
+                      {fileItem.uploaded && <span className="status-uploaded">✅ Uploaded</span>}
+                      {fileItem.error && <span className="status-error">❌ {fileItem.error}</span>}
+                      {!fileItem.uploaded && !fileItem.uploading && (
+                        <button
+                          type="button"
+                          onClick={() => removeFile(fileItem.id)}
+                          className="remove-file-btn"
+                          disabled={loading}
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
           {error && (
             <div className="alert alert-error">
               <span className="alert-icon">⚠️</span>
@@ -377,14 +620,85 @@ const PaymentForm = () => {
               <li><strong>User:</strong> {user.fullName}</li>
               <li><strong>Email:</strong> {user.email}</li>
               <li><strong>Department:</strong> {user.department}</li>
-              <li><strong>Currency:</strong> Fixed to MYR (Malaysian Ringgit)</li>
+              <li><strong>Search:</strong> You can search both leads and customers</li>
               <li><strong>Status:</strong> New payments are created with "pending" status</li>
+              <li><strong>Files:</strong> Uploaded files are stored securely in S3</li>
             </ul>
           </div>
         </div>
       </div>
 
       <style jsx>{`
+        /* Enhanced styles for lead/customer search with tags */
+        
+        .source-type-tag {
+          display: inline-block;
+          padding: 4px 8px;
+          border-radius: 10px;
+          font-size: 11px;
+          font-weight: 600;
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+          margin-left: 8px;
+        }
+
+        .source-type-tag.small {
+          padding: 2px 6px;
+          font-size: 9px;
+        }
+
+        .source-type-tag.lead {
+          background-color: #3498db;
+          color: white;
+        }
+
+        .source-type-tag.customer {
+          background-color: #27ae60;
+          color: white;
+        }
+
+        .lead-title-row {
+          display: flex;
+          align-items: center;
+          flex: 1;
+        }
+
+        .source-type-tag-container {
+          margin-left: auto;
+          margin-right: 15px;
+        }
+
+        .result-name-container {
+          display: flex;
+          align-items: center;
+          flex: 1;
+        }
+
+        .search-result-item {
+          padding: 15px;
+          border-bottom: 1px solid #f1f1f1;
+          cursor: pointer;
+          transition: background-color 0.2s;
+          position: relative;
+        }
+
+        .search-result-item:hover {
+          background-color: #f8f9fa;
+        }
+
+        .result-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          margin-bottom: 8px;
+        }
+
+        .status-badge.small {
+          padding: 2px 6px;
+          font-size: 9px;
+        }
+
+        /* Rest of the existing styles remain the same */
         .payment-form-container {
           max-width: 1000px;
           margin: 0 auto;
@@ -492,6 +806,127 @@ const PaymentForm = () => {
           min-height: 80px;
         }
 
+        /* File Upload Styles */
+        .file-upload-area {
+          border: 2px dashed #e1e8ed;
+          border-radius: 8px;
+          padding: 40px 20px;
+          text-align: center;
+          transition: all 0.2s;
+          cursor: pointer;
+          background-color: #fafbfc;
+        }
+
+        .file-upload-area:hover,
+        .file-upload-area.drag-active {
+          border-color: #3498db;
+          background-color: rgba(52, 152, 219, 0.05);
+        }
+
+        .file-input {
+          display: none;
+        }
+
+        .file-upload-label {
+          cursor: pointer;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 10px;
+        }
+
+        .file-upload-icon {
+          font-size: 32px;
+          color: #7f8c8d;
+        }
+
+        .file-upload-text {
+          color: #2c3e50;
+        }
+
+        .file-upload-text strong {
+          color: #3498db;
+        }
+
+        .file-upload-text small {
+          color: #7f8c8d;
+          margin-top: 5px;
+        }
+
+        .file-list {
+          margin-top: 20px;
+          border: 1px solid #e1e8ed;
+          border-radius: 8px;
+          overflow: hidden;
+        }
+
+        .file-item {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          padding: 15px;
+          border-bottom: 1px solid #f1f1f1;
+          background: white;
+        }
+
+        .file-item:last-child {
+          border-bottom: none;
+        }
+
+        .file-info {
+          flex: 1;
+        }
+
+        .file-name {
+          font-weight: 600;
+          color: #2c3e50;
+          margin-bottom: 5px;
+        }
+
+        .file-meta {
+          font-size: 12px;
+          color: #7f8c8d;
+        }
+
+        .file-status {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+        }
+
+        .status-uploading {
+          color: #f39c12;
+          font-size: 14px;
+        }
+
+        .status-uploaded {
+          color: #27ae60;
+          font-size: 14px;
+        }
+
+        .status-error {
+          color: #e74c3c;
+          font-size: 12px;
+        }
+
+        .remove-file-btn {
+          background: #e74c3c;
+          color: white;
+          border: none;
+          border-radius: 50%;
+          width: 24px;
+          height: 24px;
+          cursor: pointer;
+          font-size: 12px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .remove-file-btn:hover {
+          background: #c0392b;
+        }
+
         /* Lead Search Styles */
         .lead-search-section {
           position: relative;
@@ -521,32 +956,14 @@ const PaymentForm = () => {
           border: 1px solid #e1e8ed;
           border-top: none;
           border-radius: 0 0 8px 8px;
-          max-height: 300px;
+          max-height: 400px;
           overflow-y: auto;
           z-index: 1000;
           box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
         }
 
-        .search-result-item {
-          padding: 15px;
-          border-bottom: 1px solid #f1f1f1;
-          cursor: pointer;
-          transition: background-color 0.2s;
-        }
-
-        .search-result-item:hover {
-          background-color: #f8f9fa;
-        }
-
         .search-result-item:last-child {
           border-bottom: none;
-        }
-
-        .result-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 8px;
         }
 
         .result-details {
@@ -794,6 +1211,27 @@ const PaymentForm = () => {
             bottom: 0;
             max-height: none;
             z-index: 9999;
+          }
+
+          .file-item {
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 10px;
+          }
+
+          .file-status {
+            align-self: flex-end;
+          }
+
+          .lead-title-row {
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 8px;
+          }
+
+          .source-type-tag-container {
+            margin-left: 0;
+            margin-right: 0;
           }
         }
       `}</style>

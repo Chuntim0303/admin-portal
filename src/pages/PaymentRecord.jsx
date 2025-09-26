@@ -7,25 +7,30 @@ const PaymentRecord = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [filters, setFilters] = useState({
-    status: '',
+    status: 'pending', // Default to pending
     payment_method: '',
     search: ''
   });
   const [sortConfig, setSortConfig] = useState({
-    key: 'created_at',
+    key: 'id',
     direction: 'desc'
   });
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage] = useState(10);
+  
+  // Editing states
+  const [editingReceipt, setEditingReceipt] = useState(null);
+  const [editReceiptValue, setEditReceiptValue] = useState('');
+  const [updateLoading, setUpdateLoading] = useState(null);
 
   // Check if user has access to payment records
-  if (user.role !== 'account') {
+  if (!['account', 'sales_admin', 'management', 'admin'].includes(user.role)) {
     return (
       <div className="access-denied">
         <div className="access-denied-content">
           <h2>Access Denied</h2>
           <p>You don't have permission to view payment records.</p>
-          <p>Only users with 'account' role can access this page.</p>
+          <p>Only users with 'account', 'sales_admin', 'management', or 'admin' roles can access this page.</p>
         </div>
       </div>
     );
@@ -91,9 +96,11 @@ const PaymentRecord = () => {
       filtered = filtered.filter(payment => 
         payment.id.toString().includes(searchLower) ||
         payment.description?.toLowerCase().includes(searchLower) ||
-        payment.user_details?.full_name?.toLowerCase().includes(searchLower) ||
-        payment.reference_number?.toLowerCase().includes(searchLower) ||
-        payment.transaction_id?.toLowerCase().includes(searchLower)
+        payment.user_details?.email?.toLowerCase().includes(searchLower) ||
+        // Updated to use customer_details instead of lead_details
+        payment.customer_details?.full_name?.toLowerCase().includes(searchLower) ||
+        payment.lead_details?.full_name?.toLowerCase().includes(searchLower) || // Backward compatibility
+        payment.official_receipt?.toLowerCase().includes(searchLower)
       );
     }
 
@@ -137,6 +144,7 @@ const PaymentRecord = () => {
   const getStatusBadge = (status) => {
     const statusClasses = {
       pending: 'status-pending',
+      reviewed: 'status-reviewed',
       completed: 'status-completed',
       failed: 'status-failed',
       processing: 'status-processing'
@@ -154,6 +162,72 @@ const PaymentRecord = () => {
     return sortConfig.direction === 'desc' ? '↓' : '↑';
   };
 
+  const formatAmount = (amount) => {
+    return `MYR ${parseFloat(amount).toFixed(2)}`;
+  };
+
+  // Official receipt editing functions
+  const startEditingReceipt = (paymentId, currentValue) => {
+    setEditingReceipt(paymentId);
+    setEditReceiptValue(currentValue || '');
+  };
+
+  const cancelEditingReceipt = () => {
+    setEditingReceipt(null);
+    setEditReceiptValue('');
+  };
+
+  const saveReceiptEdit = async (paymentId) => {
+    if (!editReceiptValue.trim()) {
+      alert('Official receipt number cannot be empty');
+      return;
+    }
+
+    setUpdateLoading(paymentId);
+    try {
+      const response = await apiCall(`/payments/${paymentId}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          official_receipt: editReceiptValue.trim()
+        })
+      });
+
+      if (response.success) {
+        // Update the payment in the local state
+        setPayments(prevPayments => 
+          prevPayments.map(payment => 
+            payment.id === paymentId 
+              ? { 
+                  ...payment, 
+                  official_receipt: editReceiptValue.trim(),
+                  processed_at: response.data.processed_at,
+                  processed_by: response.data.processed_by,
+                  status: response.data.status
+                }
+              : payment
+          )
+        );
+        setEditingReceipt(null);
+        setEditReceiptValue('');
+      } else {
+        throw new Error(response.error?.message || 'Failed to update official receipt');
+      }
+    } catch (err) {
+      console.error('Error updating official receipt:', err);
+      alert(err.message || 'Failed to update official receipt');
+    } finally {
+      setUpdateLoading(null);
+    }
+  };
+
+  const handleReceiptKeyPress = (e, paymentId) => {
+    if (e.key === 'Enter') {
+      saveReceiptEdit(paymentId);
+    } else if (e.key === 'Escape') {
+      cancelEditingReceipt();
+    }
+  };
+
   if (loading) {
     return (
       <div className="loading-container">
@@ -169,7 +243,7 @@ const PaymentRecord = () => {
         <div className="header-content">
           <h2>Payment Records</h2>
           <p className="header-subtitle">
-            View and manage all payment transactions
+            View and manage payment transactions
           </p>
         </div>
         
@@ -193,6 +267,7 @@ const PaymentRecord = () => {
             >
               <option value="">All Statuses</option>
               <option value="pending">Pending</option>
+              <option value="reviewed">Reviewed</option>
               <option value="completed">Completed</option>
               <option value="failed">Failed</option>
               <option value="processing">Processing</option>
@@ -207,9 +282,9 @@ const PaymentRecord = () => {
               className="filter-select"
             >
               <option value="">All Methods</option>
-              <option value="credit_card">Credit Card</option>
               <option value="bank_transfer">Bank Transfer</option>
-              <option value="paypal">PayPal</option>
+              <option value="tng">TNG</option>
+              <option value="card">Card</option>
               <option value="cash">Cash</option>
             </select>
           </div>
@@ -218,7 +293,7 @@ const PaymentRecord = () => {
             <label>Search:</label>
             <input
               type="text"
-              placeholder="Search by ID, description, user, reference..."
+              placeholder="Search by ID, description, user, official receipt..."
               value={filters.search}
               onChange={(e) => handleFilterChange('search', e.target.value)}
               className="filter-input"
@@ -249,26 +324,32 @@ const PaymentRecord = () => {
               <th onClick={() => handleSort('id')} className="sortable">
                 ID {getSortIcon('id')}
               </th>
-              <th>User</th>
+              <th>Customer</th>
               <th onClick={() => handleSort('amount')} className="sortable">
                 Amount {getSortIcon('amount')}
               </th>
-              <th>Currency</th>
-              <th>Payment Method</th>
+              <th onClick={() => handleSort('payment_method')} className="sortable">
+                Payment Method {getSortIcon('payment_method')}
+              </th>
               <th>Description</th>
+              <th>Attachments</th>
+              <th onClick={() => handleSort('official_receipt')} className="sortable">
+                Official Receipt {getSortIcon('official_receipt')}
+              </th>
               <th onClick={() => handleSort('status')} className="sortable">
                 Status {getSortIcon('status')}
               </th>
-              <th>Reference #</th>
-              <th>Transaction ID</th>
+              <th>Created By</th>
               <th onClick={() => handleSort('created_at')} className="sortable">
-                Created {getSortIcon('created_at')}
+                Created Date {getSortIcon('created_at')}
               </th>
               <th onClick={() => handleSort('updated_at')} className="sortable">
-                Updated {getSortIcon('updated_at')}
+                Updated Date {getSortIcon('updated_at')}
               </th>
-              <th>Processed At</th>
               <th>Processed By</th>
+              <th onClick={() => handleSort('processed_at')} className="sortable">
+                Processed At {getSortIcon('processed_at')}
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -276,37 +357,128 @@ const PaymentRecord = () => {
               paginatedPayments.map((payment) => (
                 <tr key={payment.id}>
                   <td className="id-cell">{payment.id}</td>
-                  <td className="user-cell">
-                    <div className="user-info">
-                      <div className="user-name">{payment.user_details?.full_name || 'N/A'}</div>
-                      <div className="user-email">{payment.user_details?.email || ''}</div>
+                  
+                  {/* Customer - Updated to use customer_details or lead_details for backward compatibility */}
+                  <td className="customer-cell">
+                    <div className="customer-info">
+                      {(payment.customer_details || payment.lead_details) ? (
+                        <>
+                          <div className="customer-name">
+                            {payment.customer_details?.full_name || payment.lead_details?.full_name}
+                          </div>
+                          <div className="customer-email">
+                            {payment.customer_details?.email || payment.lead_details?.email}
+                          </div>
+                        </>
+                      ) : (
+                        <div className="no-customer">No customer linked</div>
+                      )}
                     </div>
                   </td>
+                  
                   <td className="amount-cell">
-                    {payment.currency} {parseFloat(payment.amount).toFixed(2)}
+                    {formatAmount(payment.amount)}
                   </td>
-                  <td>{payment.currency}</td>
+                  
                   <td className="payment-method-cell">
                     {payment.payment_method.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}
                   </td>
+                  
                   <td className="description-cell">
                     <div title={payment.description}>
                       {payment.description || '-'}
                     </div>
                   </td>
+                  
+                  <td className="attachments-cell">
+                    {payment.attachments && payment.attachments.length > 0 ? (
+                      <div className="attachments-info">
+                        <span className="attachment-count">
+                          📎 {payment.attachments.length} file{payment.attachments.length > 1 ? 's' : ''}
+                        </span>
+                        <div className="attachment-list">
+                          {payment.attachments.map((file, index) => (
+                            <a 
+                              key={index} 
+                              href={file.url} 
+                              target="_blank" 
+                              rel="noopener noreferrer"
+                              className="attachment-link"
+                              title={`${file.filename} (${file.size} bytes)`}
+                            >
+                              {file.filename}
+                            </a>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <span className="no-attachments">-</span>
+                    )}
+                  </td>
+                  
+                  <td className="official-receipt-cell">
+                    {editingReceipt === payment.id ? (
+                      <div className="receipt-edit-container">
+                        <input
+                          type="text"
+                          value={editReceiptValue}
+                          onChange={(e) => setEditReceiptValue(e.target.value)}
+                          onKeyPress={(e) => handleReceiptKeyPress(e, payment.id)}
+                          className="receipt-edit-input"
+                          placeholder="Enter official receipt number"
+                          disabled={updateLoading === payment.id}
+                          autoFocus
+                        />
+                        <div className="receipt-edit-actions">
+                          <button
+                            onClick={() => saveReceiptEdit(payment.id)}
+                            className="receipt-save-btn"
+                            disabled={updateLoading === payment.id}
+                            title="Save (Enter)"
+                          >
+                            {updateLoading === payment.id ? '⏳' : '✓'}
+                          </button>
+                          <button
+                            onClick={cancelEditingReceipt}
+                            className="receipt-cancel-btn"
+                            disabled={updateLoading === payment.id}
+                            title="Cancel (Escape)"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="receipt-display-container">
+                        <span className="receipt-number">
+                          {payment.official_receipt || 'Not set'}
+                        </span>
+                        {(['account', 'sales_admin', 'management', 'admin'].includes(user.role)) && (
+                          <button
+                            onClick={() => startEditingReceipt(payment.id, payment.official_receipt)}
+                            className="receipt-edit-trigger"
+                            title="Click to edit official receipt"
+                          >
+                            ✎
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </td>
+                  
                   <td className="status-cell">
                     {getStatusBadge(payment.status)}
                   </td>
-                  <td className="reference-cell">
-                    {payment.reference_number || '-'}
+                  
+                  {/* Created By - Show only email */}
+                  <td className="user-cell">
+                    <div className="user-email">{payment.user_details?.email || 'N/A'}</div>
                   </td>
-                  <td className="transaction-cell">
-                    {payment.transaction_id || '-'}
-                  </td>
+                  
                   <td className="date-cell">{formatDate(payment.created_at)}</td>
                   <td className="date-cell">{formatDate(payment.updated_at)}</td>
+                  <td className="processed-by-cell">{payment.processed_by || '-'}</td>
                   <td className="date-cell">{formatDate(payment.processed_at)}</td>
-                  <td>{payment.processed_by || '-'}</td>
                 </tr>
               ))
             ) : (
@@ -350,11 +522,14 @@ const PaymentRecord = () => {
         </div>
       )}
 
+      {/* Include all the existing styles from the original PaymentRecord component */}
       <style jsx>{`
         .payment-records-container {
-          padding: 20px;
+          padding: 30px;
           max-width: 100%;
           margin: 0 auto;
+          background: #f5f5f5;
+          min-height: 100vh;
         }
 
         .access-denied {
@@ -368,9 +543,8 @@ const PaymentRecord = () => {
         .access-denied-content {
           background: white;
           padding: 40px;
-          border-radius: 12px;
-          box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-          border: 1px solid #e1e8ed;
+          border-radius: 8px;
+          box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
         }
 
         .access-denied h2 {
@@ -383,20 +557,22 @@ const PaymentRecord = () => {
           justify-content: space-between;
           align-items: flex-start;
           margin-bottom: 25px;
-          padding-bottom: 15px;
-          border-bottom: 2px solid #e1e8ed;
+          padding: 25px 30px;
+          background: white;
+          border-radius: 8px;
+          box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
         }
 
         .header-content h2 {
           margin: 0 0 5px 0;
-          color: #2c3e50;
+          color: #333;
           font-size: 28px;
           font-weight: 600;
         }
 
         .header-subtitle {
           margin: 0;
-          color: #7f8c8d;
+          color: #666;
           font-size: 16px;
         }
 
@@ -411,20 +587,20 @@ const PaymentRecord = () => {
           gap: 8px;
           padding: 10px 16px;
           border: none;
-          border-radius: 8px;
+          border-radius: 6px;
           font-size: 14px;
-          font-weight: 600;
+          font-weight: 500;
           cursor: pointer;
           transition: all 0.2s;
         }
 
         .btn-secondary {
-          background-color: #95a5a6;
+          background-color: #6c757d;
           color: white;
         }
 
         .btn-secondary:hover:not(:disabled) {
-          background-color: #7f8c8d;
+          background-color: #5a6268;
         }
 
         .btn:disabled {
@@ -435,10 +611,9 @@ const PaymentRecord = () => {
         .filters-section {
           background: white;
           padding: 20px;
-          border-radius: 12px;
-          box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+          border-radius: 8px;
+          box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
           margin-bottom: 20px;
-          border: 1px solid #e1e8ed;
         }
 
         .filters-row {
@@ -455,16 +630,16 @@ const PaymentRecord = () => {
         }
 
         .filter-group label {
-          font-weight: 600;
-          color: #2c3e50;
+          font-weight: 500;
+          color: #333;
           font-size: 14px;
         }
 
         .filter-select,
         .filter-input {
           padding: 8px 12px;
-          border: 2px solid #e1e8ed;
-          border-radius: 6px;
+          border: 1px solid #ddd;
+          border-radius: 4px;
           font-size: 14px;
           transition: border-color 0.2s;
         }
@@ -472,11 +647,11 @@ const PaymentRecord = () => {
         .filter-select:focus,
         .filter-input:focus {
           outline: none;
-          border-color: #3498db;
+          border-color: #007bff;
         }
 
         .results-info {
-          color: #7f8c8d;
+          color: #666;
           font-size: 14px;
         }
 
@@ -484,11 +659,11 @@ const PaymentRecord = () => {
           display: flex;
           align-items: center;
           gap: 10px;
-          background-color: #fee;
-          border: 1px solid #fcc;
+          background-color: #ffeaea;
+          border: 1px solid #ffcdd2;
           color: #c33;
           padding: 12px 16px;
-          border-radius: 8px;
+          border-radius: 6px;
           margin-bottom: 20px;
         }
 
@@ -504,10 +679,9 @@ const PaymentRecord = () => {
 
         .table-container {
           background: white;
-          border-radius: 12px;
-          box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+          border-radius: 8px;
+          box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
           overflow: hidden;
-          border: 1px solid #e1e8ed;
         }
 
         .payments-table {
@@ -518,11 +692,11 @@ const PaymentRecord = () => {
 
         .payments-table th {
           background-color: #f8f9fa;
-          color: #2c3e50;
+          color: #333;
           font-weight: 600;
           padding: 15px 12px;
           text-align: left;
-          border-bottom: 2px solid #e1e8ed;
+          border-bottom: 2px solid #dee2e6;
           white-space: nowrap;
         }
 
@@ -537,7 +711,7 @@ const PaymentRecord = () => {
 
         .payments-table td {
           padding: 12px;
-          border-bottom: 1px solid #e1e8ed;
+          border-bottom: 1px solid #dee2e6;
           vertical-align: top;
         }
 
@@ -547,27 +721,34 @@ const PaymentRecord = () => {
 
         .id-cell {
           font-weight: 600;
-          color: #3498db;
+          color: #007bff;
         }
 
-        .user-cell {
+        .customer-cell {
           min-width: 150px;
         }
 
-        .user-name {
+        .customer-name {
           font-weight: 600;
-          color: #2c3e50;
+          color: #333;
         }
 
-        .user-email {
+        .customer-email {
           font-size: 12px;
-          color: #7f8c8d;
+          color: #666;
+        }
+
+        .no-customer {
+          font-style: italic;
+          color: #999;
+          font-size: 13px;
         }
 
         .amount-cell {
           font-weight: 600;
           text-align: right;
-          color: #27ae60;
+          color: #28a745;
+          min-width: 100px;
         }
 
         .payment-method-cell {
@@ -584,12 +765,174 @@ const PaymentRecord = () => {
           white-space: nowrap;
         }
 
+        .attachments-cell {
+          min-width: 120px;
+        }
+
+        .attachments-info {
+          display: flex;
+          flex-direction: column;
+          gap: 5px;
+        }
+
+        .attachment-count {
+          font-size: 12px;
+          color: #007bff;
+          font-weight: 500;
+        }
+
+        .attachment-list {
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+        }
+
+        .attachment-link {
+          font-size: 12px;
+          color: #007bff;
+          text-decoration: none;
+          max-width: 120px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .attachment-link:hover {
+          text-decoration: underline;
+        }
+
+        .no-attachments {
+          color: #999;
+          font-style: italic;
+        }
+
+        .official-receipt-cell {
+          font-family: monospace;
+          font-size: 13px;
+          min-width: 160px;
+          position: relative;
+        }
+
+        .receipt-display-container {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+
+        .receipt-number {
+          background: #e8f5e8;
+          padding: 4px 8px;
+          border-radius: 4px;
+          color: #28a745;
+          font-weight: 500;
+          flex: 1;
+        }
+
+        .receipt-edit-trigger {
+          background: #007bff;
+          color: white;
+          border: none;
+          border-radius: 4px;
+          width: 20px;
+          height: 20px;
+          cursor: pointer;
+          font-size: 11px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          opacity: 0.7;
+          transition: opacity 0.2s;
+        }
+
+        .receipt-edit-trigger:hover {
+          opacity: 1;
+        }
+
+        .receipt-edit-container {
+          display: flex;
+          flex-direction: column;
+          gap: 5px;
+          width: 100%;
+        }
+
+        .receipt-edit-input {
+          padding: 4px 6px;
+          border: 2px solid #007bff;
+          border-radius: 4px;
+          font-size: 12px;
+          font-family: monospace;
+          width: 100%;
+        }
+
+        .receipt-edit-input:focus {
+          outline: none;
+          border-color: #0056b3;
+          box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.2);
+        }
+
+        .receipt-edit-input:disabled {
+          background-color: #f8f9fa;
+          opacity: 0.7;
+        }
+
+        .receipt-edit-actions {
+          display: flex;
+          gap: 4px;
+          align-items: center;
+        }
+
+        .receipt-save-btn {
+          background: #28a745;
+          color: white;
+          border: none;
+          border-radius: 4px;
+          width: 20px;
+          height: 20px;
+          cursor: pointer;
+          font-size: 12px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .receipt-save-btn:hover:not(:disabled) {
+          background: #218838;
+        }
+
+        .receipt-save-btn:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+        }
+
+        .receipt-cancel-btn {
+          background: #dc3545;
+          color: white;
+          border: none;
+          border-radius: 4px;
+          width: 20px;
+          height: 20px;
+          cursor: pointer;
+          font-size: 10px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .receipt-cancel-btn:hover:not(:disabled) {
+          background: #c82333;
+        }
+
+        .receipt-cancel-btn:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+        }
+
         .status-badge {
           display: inline-block;
           padding: 4px 8px;
           border-radius: 12px;
           font-size: 12px;
-          font-weight: 600;
+          font-weight: 500;
           text-transform: uppercase;
         }
 
@@ -597,6 +940,12 @@ const PaymentRecord = () => {
           background-color: #fff3cd;
           color: #856404;
           border: 1px solid #ffeaa7;
+        }
+
+        .status-reviewed {
+          background-color: #cce7ff;
+          color: #004085;
+          border: 1px solid #b6d4fe;
         }
 
         .status-completed {
@@ -623,15 +972,25 @@ const PaymentRecord = () => {
           border: 1px solid #dee2e6;
         }
 
-        .reference-cell,
-        .transaction-cell {
-          font-family: monospace;
+        .user-cell {
+          min-width: 140px;
+        }
+
+        .user-email {
           font-size: 13px;
+          color: #333;
+        }
+
+        .processed-by-cell {
+          font-size: 13px;
+          color: #666;
+          min-width: 140px;
         }
 
         .date-cell {
-          color: #6c757d;
+          color: #666;
           font-size: 13px;
+          min-width: 120px;
         }
 
         .no-data-cell {
@@ -644,7 +1003,7 @@ const PaymentRecord = () => {
           flex-direction: column;
           align-items: center;
           gap: 10px;
-          color: #7f8c8d;
+          color: #666;
         }
 
         .no-data-icon {
@@ -663,22 +1022,22 @@ const PaymentRecord = () => {
           gap: 15px;
           background: white;
           padding: 15px 20px;
-          border-radius: 8px;
-          box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+          border-radius: 6px;
+          box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
         }
 
         .pagination-btn {
           padding: 8px 16px;
-          border: 1px solid #e1e8ed;
+          border: 1px solid #ddd;
           background: white;
-          border-radius: 6px;
+          border-radius: 4px;
           cursor: pointer;
           transition: all 0.2s;
         }
 
         .pagination-btn:hover:not(:disabled) {
           background-color: #f8f9fa;
-          border-color: #3498db;
+          border-color: #007bff;
         }
 
         .pagination-btn:disabled {
@@ -687,8 +1046,8 @@ const PaymentRecord = () => {
         }
 
         .pagination-info {
-          font-weight: 600;
-          color: #2c3e50;
+          font-weight: 500;
+          color: #333;
         }
 
         .loading-container {
@@ -697,14 +1056,14 @@ const PaymentRecord = () => {
           align-items: center;
           justify-content: center;
           height: 200px;
-          color: #7f8c8d;
+          color: #666;
         }
 
         .loading-spinner {
           width: 40px;
           height: 40px;
           border: 4px solid #f3f3f3;
-          border-top: 4px solid #3498db;
+          border-top: 4px solid #007bff;
           border-radius: 50%;
           animation: spin 1s linear infinite;
           margin-bottom: 15px;
@@ -728,12 +1087,13 @@ const PaymentRecord = () => {
 
         @media (max-width: 768px) {
           .payment-records-container {
-            padding: 10px;
+            padding: 15px;
           }
 
           .records-header {
             flex-direction: column;
             gap: 15px;
+            padding: 20px;
           }
 
           .filters-row {
@@ -745,7 +1105,7 @@ const PaymentRecord = () => {
           }
 
           .payments-table {
-            min-width: 1200px;
+            min-width: 1600px;
           }
         }
       `}</style>

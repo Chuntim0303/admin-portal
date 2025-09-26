@@ -445,6 +445,26 @@ const Login = () => {
   );
 };
 
+// Role-based access control helper
+const hasAccess = (userRole, requiredRoles) => {
+  return requiredRoles.includes(userRole);
+};
+
+// Access Denied Component
+const AccessDenied = ({ message, userRole, requiredRoles }) => (
+  <div className="access-denied">
+    <div className="access-denied-content">
+      <h2>Access Denied</h2>
+      <p>{message || `You don't have permission to access this feature.`}</p>
+      <div className="role-info">
+        <p><strong>Your Role:</strong> {userRole}</p>
+        <p><strong>Required Roles:</strong> {requiredRoles.join(', ')}</p>
+      </div>
+      <p>Please contact your administrator if you believe you should have access.</p>
+    </div>
+  </div>
+);
+
 // Main Dashboard Component
 const Dashboard = () => {
   const { user } = useContext(AuthContext);
@@ -452,22 +472,66 @@ const Dashboard = () => {
 
   // Set default page based on user role
   useEffect(() => {
-    if (user.role === 'agent') {
-      setCurrentPage('paymentForm');
-    } else if (user.role === 'account') {
-      setCurrentPage('paymentRecord'); // Changed default to payment records for account role
+    if (user.role === 'sales') {
+      setCurrentPage('paymentForm'); // Sales can only create payments
+    } else if (['account', 'sales_admin', 'management', 'admin'].includes(user.role)) {
+      setCurrentPage('paymentRecord'); // Others default to payment records
     }
   }, [user.role]);
 
   const renderCurrentPage = () => {
     switch (currentPage) {
       case 'paymentForm':
-        return <PaymentForm />;
+        // All roles can access payment form
+        if (hasAccess(user.role, ['account', 'sales', 'sales_admin', 'management', 'admin'])) {
+          return <PaymentForm />;
+        } else {
+          return <AccessDenied 
+            message="You don't have permission to create payments." 
+            userRole={user.role}
+            requiredRoles={['account', 'sales', 'sales_admin', 'management', 'admin']}
+          />;
+        }
+
       case 'paymentRecord':
-        return <PaymentRecord />;
+        // Payment records - all except sales
+        if (hasAccess(user.role, ['account', 'sales_admin', 'management', 'admin'])) {
+          return <PaymentRecord />;
+        } else {
+          return <AccessDenied 
+            message="You don't have permission to view payment records." 
+            userRole={user.role}
+            requiredRoles={['account', 'sales_admin', 'management', 'admin']}
+          />;
+        }
+
+      case 'adminUsers':
+        // User management - management and admin only
+        if (hasAccess(user.role, ['management', 'admin'])) {
+          return <div>User Management Component (To be implemented)</div>;
+        } else {
+          return <AccessDenied 
+            message="You don't have permission to manage users." 
+            userRole={user.role}
+            requiredRoles={['management', 'admin']}
+          />;
+        }
+
       default:
         return <PaymentForm />;
     }
+  };
+
+  // Get role display name
+  const getRoleDisplayName = (role) => {
+    const roleNames = {
+      account: 'Account',
+      sales: 'Sales',
+      sales_admin: 'Sales Admin',
+      management: 'Management',
+      admin: 'Admin'
+    };
+    return roleNames[role] || role;
   };
 
   return (
@@ -483,7 +547,10 @@ const Dashboard = () => {
             <div className="content-header">
               <h2>Payment Management System</h2>
               <div className="user-info">
-                Welcome, {user.fullName} ({user.role})
+                <span className="welcome-text">Welcome, {user.fullName}</span>
+                <span className={`role-badge role-${user.role}`}>
+                  {getRoleDisplayName(user.role)}
+                </span>
               </div>
             </div>
             <div className="content-body">
@@ -531,15 +598,92 @@ const Dashboard = () => {
         }
 
         .user-info {
+          display: flex;
+          align-items: center;
+          gap: 15px;
+        }
+
+        .welcome-text {
           color: #7f8c8d;
           font-size: 14px;
           font-weight: 500;
+        }
+
+        .role-badge {
+          padding: 6px 12px;
+          border-radius: 12px;
+          font-size: 12px;
+          font-weight: 600;
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+        }
+
+        .role-account {
+          background-color: #27ae60;
+          color: white;
+        }
+
+        .role-sales {
+          background-color: #3498db;
+          color: white;
+        }
+
+        .role-sales_admin {
+          background-color: #9b59b6;
+          color: white;
+        }
+
+        .role-management {
+          background-color: #e67e22;
+          color: white;
+        }
+
+        .role-admin {
+          background-color: #e74c3c;
+          color: white;
         }
 
         .content-body {
           flex: 1;
           padding: 0;
           overflow-x: hidden;
+        }
+
+        .access-denied {
+          display: flex;
+          justify-content: center;
+          align-items: center;
+          min-height: 400px;
+          padding: 40px;
+        }
+
+        .access-denied-content {
+          background: white;
+          padding: 40px;
+          border-radius: 12px;
+          box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+          border: 1px solid #e1e8ed;
+          text-align: center;
+          max-width: 500px;
+        }
+
+        .access-denied h2 {
+          color: #e74c3c;
+          margin: 0 0 15px 0;
+          font-size: 24px;
+        }
+
+        .role-info {
+          background: #f8f9fa;
+          padding: 15px;
+          border-radius: 8px;
+          margin: 20px 0;
+          text-align: left;
+        }
+
+        .role-info p {
+          margin: 5px 0;
+          font-size: 14px;
         }
 
         /* Mobile responsiveness */
@@ -557,6 +701,10 @@ const Dashboard = () => {
           
           .content-header h2 {
             font-size: 20px;
+          }
+
+          .user-info {
+            align-self: flex-end;
           }
         }
 
